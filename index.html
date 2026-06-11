@@ -5,9 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>StudySync V7 - Persistent Storage</title>
     
+    <!-- PWA Links -->
     <link rel="manifest" href="manifest.json">
     <meta name="theme-color" content="#4F46E5">
 
+    <!-- Register Service Worker -->
     <script>
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {
@@ -197,47 +199,64 @@
     </div>
 
     <script>
-        // --- 1. THE INLINE WEB WORKER (Background Thread) ---
-        const workerLogic = `
-            let timerInterval = null;
-            self.onmessage = function(e) {
-                if (e.data === 'start') {
-                    timerInterval = setInterval(() => self.postMessage('tick'), 500);
-                } else if (e.data === 'stop') {
-                    clearInterval(timerInterval);
-                    timerInterval = null;
+        let worker = null;
+        
+        // --- 1. THE INLINE WEB WORKER (Wrapped in Try-Catch for safety) ---
+        try {
+            const workerLogic = `
+                let timerInterval = null;
+                self.onmessage = function(e) {
+                    if (e.data === 'start') {
+                        timerInterval = setInterval(() => self.postMessage('tick'), 500);
+                    } else if (e.data === 'stop') {
+                        clearInterval(timerInterval);
+                        timerInterval = null;
+                    }
+                };
+            `;
+            const blob = new Blob([workerLogic], { type: 'application/javascript' });
+            worker = new Worker(URL.createObjectURL(blob));
+            
+            worker.onmessage = function(e) {
+                if (e.data === 'tick' && currentActiveSubject && activeTimers[currentActiveSubject].isRunning) {
+                    const currentSeconds = getCurrentElapsed(currentActiveSubject);
+                    document.getElementById('sw-display-digital').innerText = formatTime(currentSeconds);
+                    updateAnalogHands(currentSeconds);
                 }
             };
-        `;
-        const blob = new Blob([workerLogic], { type: 'application/javascript' });
-        const worker = new Worker(URL.createObjectURL(blob));
+        } catch(error) {
+            console.warn("Background worker failed to load. Falling back to standard timer.", error);
+        }
 
         // --- 2. GLOBAL STATE ---
         let subjects = [];
         let studyHistory = []; 
         let activeTimers = {}; 
         let currentActiveSubject = null; 
+        let fallbackInterval = null; // Used if worker fails
 
-        let barChartInstance, pieChartInstance;
+        let barChartInstance = null, pieChartInstance = null;
         const chartColors = ['#4F46E5', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6'];
 
-        // --- 3. PERSISTENT STORAGE SYSTEM (NEW) ---
+        // --- 3. PERSISTENT STORAGE SYSTEM ---
         function loadData() {
-            const savedSubjects = localStorage.getItem('studySyncSubjects');
-            const savedHistory = localStorage.getItem('studySyncHistory');
-            const savedTimers = localStorage.getItem('studySyncTimers');
+            try {
+                const savedSubjects = localStorage.getItem('studySyncSubjects');
+                const savedHistory = localStorage.getItem('studySyncHistory');
+                const savedTimers = localStorage.getItem('studySyncTimers');
 
-            if (savedSubjects && savedHistory && savedTimers) {
-                // User has been here before, load their data
-                subjects = JSON.parse(savedSubjects);
-                studyHistory = JSON.parse(savedHistory);
-                activeTimers = JSON.parse(savedTimers);
-            } else {
-                // First time visitor, load defaults and mock data
-                subjects = ["OSSC Mathematics", "Odia Language", "Reasoning"];
-                subjects.forEach(sub => activeTimers[sub] = { accumulatedElapsed: 0, startTime: null, isRunning: false });
-                seedMockData();
-                saveData(); // Save the initial state
+                if (savedSubjects && savedHistory && savedTimers) {
+                    subjects = JSON.parse(savedSubjects);
+                    studyHistory = JSON.parse(savedHistory);
+                    activeTimers = JSON.parse(savedTimers);
+                } else {
+                    subjects = ["OSSC Mathematics", "Odia Language", "Reasoning"];
+                    subjects.forEach(sub => activeTimers[sub] = { accumulatedElapsed: 0, startTime: null, isRunning: false });
+                    seedMockData();
+                    saveData(); 
+                }
+            } catch (e) {
+                console.error("Failed to load local storage", e);
             }
         }
 
@@ -245,8 +264,6 @@
             localStorage.setItem('studySyncSubjects', JSON.stringify(subjects));
             localStorage.setItem('studySyncHistory', JSON.stringify(studyHistory));
             
-            // Safety measure: We do not save active ticking state to prevent background desync.
-            // We bank the time into accumulatedElapsed instead.
             const safeTimers = {};
             for (let sub in activeTimers) {
                 safeTimers[sub] = {
@@ -258,19 +275,17 @@
             localStorage.setItem('studySyncTimers', JSON.stringify(safeTimers));
         }
 
-        // Trigger safety save if user accidentally refreshes the page mid-tick
         window.addEventListener('beforeunload', () => {
             if (currentActiveSubject && activeTimers[currentActiveSubject].isRunning) {
-                worker.postMessage('stop');
+                if(worker) worker.postMessage('stop');
             }
             saveData();
         });
 
-        // Optional reset function
         function clearAllData() {
             if(confirm("Are you sure you want to delete all study history and subjects? This cannot be undone.")) {
                 localStorage.clear();
-                location.reload(); // Refresh to trigger default initialization
+                location.reload();
             }
         }
 
@@ -308,20 +323,17 @@
         }
 
         window.onload = () => {
-            loadData(); // Replaces direct assignment
-            createClockTicks();
-            renderSubjectGrid();
-            renderHistoryLog();
-            initCharts();
-            setAnalyticsTimeframe('daily', document.querySelector('.analytics-menu button.active'));
-        };
-
-        // Background worker listener
-        worker.onmessage = function(e) {
-            if (e.data === 'tick' && currentActiveSubject && activeTimers[currentActiveSubject].isRunning) {
-                const currentSeconds = getCurrentElapsed(currentActiveSubject);
-                document.getElementById('sw-display-digital').innerText = formatTime(currentSeconds);
-                updateAnalogHands(currentSeconds);
+            try {
+                loadData();
+                createClockTicks();
+                renderSubjectGrid();
+                renderHistoryLog();
+                initCharts();
+                const defaultBtn = document.querySelector('.analytics-menu button.active');
+                if(defaultBtn) setAnalyticsTimeframe('daily', defaultBtn);
+            } catch(e) {
+                console.error("Error during initialization:", e);
+                alert("Something went wrong while loading the app. Please refresh.");
             }
         };
 
@@ -345,7 +357,7 @@
                 subjects.push(val);
                 activeTimers[val] = { accumulatedElapsed: 0, startTime: null, isRunning: false };
                 document.getElementById('new-subject-input').value = '';
-                saveData(); // Save new subject
+                saveData();
                 renderSubjectGrid();
             }
         }
@@ -366,4 +378,208 @@
                 const card = document.createElement('div');
                 card.className = 'subject-card';
                 card.onclick = () => openStopwatch(sub);
-                card.innerHTML = `<h3>${sub}</h3>${statusHtml}<div s
+                card.innerHTML = `<h3>${sub}</h3>${statusHtml}<div style="margin-top:15px; font-size: 0.9em; color: var(--primary);">Click to open stopwatch →</div>`;
+                grid.appendChild(card);
+            });
+        }
+
+        function formatTime(totalSeconds) {
+            const h = Math.floor(totalSeconds / 3600).toString().padStart(2, '0');
+            const m = Math.floor((totalSeconds % 3600) / 60).toString().padStart(2, '0');
+            const s = (totalSeconds % 60).toString().padStart(2, '0');
+            return `${h}:${m}:${s}`;
+        }
+
+        function updateAnalogHands(totalSeconds) {
+            const secHand = document.getElementById('hand-sec');
+            const minHand = document.getElementById('hand-min');
+            const seconds = totalSeconds % 60;
+            const minutes = Math.floor(totalSeconds / 60) % 60;
+            secHand.style.transform = `translateX(-50%) rotate(${seconds * 6}deg)`;
+            minHand.style.transform = `translateX(-50%) rotate(${(minutes * 6) + (seconds * 0.1)}deg)`;
+        }
+
+        function openStopwatch(subject) {
+            currentActiveSubject = subject;
+            document.getElementById('main-ui').style.display = 'none';
+            document.getElementById('stopwatch-view').classList.add('active');
+            document.getElementById('sw-title').innerText = subject;
+            updateStopwatchUI();
+        }
+
+        function closeStopwatch() {
+            document.getElementById('stopwatch-view').classList.remove('active');
+            document.getElementById('main-ui').style.display = 'block';
+            currentActiveSubject = null;
+            renderSubjectGrid(); 
+        }
+
+        function updateStopwatchUI() {
+            if(!currentActiveSubject) return;
+            const state = activeTimers[currentActiveSubject];
+            const currentSeconds = getCurrentElapsed(currentActiveSubject); 
+
+            document.getElementById('sw-display-digital').innerText = formatTime(currentSeconds);
+            updateAnalogHands(currentSeconds);
+
+            const startBtn = document.getElementById('btn-sw-start');
+            const statusLabel = document.getElementById('sw-status');
+            
+            if (state.isRunning) {
+                startBtn.innerText = "Pause"; startBtn.className = "sw-btn btn-pause";
+                statusLabel.innerText = "Status: Recording..."; statusLabel.style.color = "var(--success)";
+            } else {
+                startBtn.innerText = currentSeconds > 0 ? "Resume" : "Start";
+                startBtn.className = "sw-btn btn-play";
+                statusLabel.innerText = currentSeconds > 0 ? "Status: Paused" : "Status: Ready";
+                statusLabel.style.color = "#9CA3AF";
+            }
+        }
+
+        function timerFallbackTick() {
+            if (currentActiveSubject && activeTimers[currentActiveSubject].isRunning) {
+                const currentSeconds = getCurrentElapsed(currentActiveSubject);
+                document.getElementById('sw-display-digital').innerText = formatTime(currentSeconds);
+                updateAnalogHands(currentSeconds);
+            }
+        }
+
+        function toggleTimer() {
+            const state = activeTimers[currentActiveSubject];
+            if (state.isRunning) {
+                if(worker) worker.postMessage('stop');
+                else clearInterval(fallbackInterval);
+                state.isRunning = false;
+                state.accumulatedElapsed = Math.floor((Date.now() - state.startTime) / 1000);
+            } else {
+                state.isRunning = true;
+                state.startTime = Date.now() - (state.accumulatedElapsed * 1000);
+                if(worker) worker.postMessage('start');
+                else fallbackInterval = setInterval(timerFallbackTick, 500);
+            }
+            saveData();
+            updateStopwatchUI();
+        }
+
+        function stopAndLogTimer() {
+            const state = activeTimers[currentActiveSubject];
+            const finalSeconds = getCurrentElapsed(currentActiveSubject);
+
+            if (finalSeconds === 0) { alert("No time to log yet!"); return; }
+            
+            if(worker) worker.postMessage('stop');
+            else clearInterval(fallbackInterval);
+            
+            const minutesStudied = +(finalSeconds / 60).toFixed(2);
+            const today = new Date();
+            
+            studyHistory.unshift({
+                dateStr: today.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }),
+                timestamp: today.getTime(), subject: currentActiveSubject, minutes: minutesStudied
+            });
+
+            state.accumulatedElapsed = 0; 
+            state.startTime = null;
+            state.isRunning = false; 
+            
+            saveData();
+            renderHistoryLog();
+            
+            const activeAnalyticsBtn = document.querySelector('.analytics-menu button.active');
+            if (activeAnalyticsBtn && activeAnalyticsBtn.innerText === "Custom Range") applyCustomDateRange();
+            else if (activeAnalyticsBtn) setAnalyticsTimeframe(activeAnalyticsBtn.innerText.toLowerCase(), activeAnalyticsBtn); 
+            
+            alert(`Successfully logged ${minutesStudied} minutes to ${currentActiveSubject}.`);
+            closeStopwatch();
+        }
+
+        // --- 6. HISTORY & ANALYTICS ---
+        function renderHistoryLog() {
+            const container = document.getElementById('history-container');
+            container.innerHTML = '';
+            if (studyHistory.length === 0) { container.innerHTML = '<p style="text-align:center; color: var(--text-muted);">No sessions logged yet.</p>'; return; }
+
+            const grouped = {};
+            studyHistory.forEach(log => {
+                if(!grouped[log.dateStr]) grouped[log.dateStr] = { total: 0, items: [] };
+                grouped[log.dateStr].items.push(log);
+                grouped[log.dateStr].total += log.minutes;
+            });
+
+            for (const [date, data] of Object.entries(grouped)) {
+                const details = document.createElement('details');
+                details.className = 'history-group';
+                const isToday = date === new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+                if(isToday) details.open = true;
+
+                let itemsHtml = data.items.map(i => `<div class="history-item"><span>${i.subject}</span><strong>${i.minutes} min</strong></div>`).join('');
+                details.innerHTML = `<summary><span>${date} ${isToday ? '(Today)' : ''}</span><span style="color: var(--primary);">${data.total.toFixed(1)} mins total ▾</span></summary><div class="history-details">${itemsHtml}</div>`;
+                container.appendChild(details);
+            }
+        }
+
+        function setAnalyticsTimeframe(timeframe, btnElement) {
+            document.querySelectorAll('.analytics-menu button').forEach(b => b.classList.remove('active'));
+            if(btnElement) btnElement.classList.add('active');
+
+            const datePickerDiv = document.getElementById('custom-date-picker');
+            if (timeframe === 'custom') { datePickerDiv.style.display = 'flex'; return; } 
+            else { datePickerDiv.style.display = 'none'; }
+
+            const now = new Date().getTime();
+            let cutoffTime = 0;
+            if (timeframe === 'daily') cutoffTime = now - (24 * 60 * 60 * 1000);
+            else if (timeframe === 'weekly') cutoffTime = now - (7 * 24 * 60 * 60 * 1000);
+            else if (timeframe === 'monthly') cutoffTime = now - (30 * 24 * 60 * 60 * 1000);
+
+            const filteredHistory = studyHistory.filter(log => log.timestamp >= cutoffTime);
+            processAndRenderCharts(filteredHistory, timeframe);
+        }
+
+        function applyCustomDateRange() {
+            const startVal = document.getElementById('date-start').value;
+            const endVal = document.getElementById('date-end').value;
+            if (!startVal || !endVal) { alert("Please select both a start and end date."); return; }
+
+            const startTimestamp = new Date(startVal).setHours(0, 0, 0, 0);
+            const endTimestamp = new Date(endVal).setHours(23, 59, 59, 999);
+            if (startTimestamp > endTimestamp) { alert("The start date cannot be after the end date."); return; }
+
+            const filteredHistory = studyHistory.filter(log => log.timestamp >= startTimestamp && log.timestamp <= endTimestamp);
+            processAndRenderCharts(filteredHistory, 'Custom Range');
+        }
+
+        function processAndRenderCharts(filteredHistory, timeframeLabel) {
+            const totals = {};
+            subjects.forEach(sub => totals[sub] = 0);
+            filteredHistory.forEach(log => { if(totals[log.subject] !== undefined) totals[log.subject] += log.minutes; });
+            const formattedTitle = timeframeLabel.charAt(0).toUpperCase() + timeframeLabel.slice(1);
+            updateCharts(totals, formattedTitle);
+        }
+
+        function initCharts() {
+            try {
+                if(typeof Chart === 'undefined') {
+                    console.warn("Chart.js failed to load over network.");
+                    return;
+                }
+                const ctxBar = document.getElementById('barChart').getContext('2d');
+                barChartInstance = new Chart(ctxBar, { type: 'bar', data: { labels: [], datasets: [{ label: 'Minutes', data: [], backgroundColor: chartColors.map(c=>c+'CC') }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: 'Total Time' } } } });
+
+                const ctxPie = document.getElementById('pieChart').getContext('2d');
+                pieChartInstance = new Chart(ctxPie, { type: 'doughnut', data: { labels: [], datasets: [{ data: [], backgroundColor: chartColors }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: 'Distribution' } } } });
+            } catch(e) {
+                console.error("Charts failed to initialize", e);
+            }
+        }
+
+        function updateCharts(dataTotals, titleLabel) {
+            if(!barChartInstance || !pieChartInstance) return;
+            const labels = Object.keys(dataTotals);
+            const data = Object.values(dataTotals).map(val => val.toFixed(1));
+            barChartInstance.data.labels = labels; barChartInstance.data.datasets[0].data = data; barChartInstance.options.plugins.title.text = `Total Time (${titleLabel})`; barChartInstance.update();
+            pieChartInstance.data.labels = labels; pieChartInstance.data.datasets[0].data = data; pieChartInstance.options.plugins.title.text = `Distribution (${titleLabel})`; pieChartInstance.update();
+        }
+    </script>
+</body>
+</html>
