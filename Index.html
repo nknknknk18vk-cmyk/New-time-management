@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>StudySync V7 - Persistent Storage</title>
+    
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#4F46E5">
+
+    <script>
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('sw.js')
+                    .then(reg => console.log('Service Worker registered!'))
+                    .catch(err => console.error('Service Worker failed:', err));
+            });
+        }
+    </script>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --primary: #4F46E5; --primary-hover: #4338CA;
+            --bg-color: #F3F4F6; --card-bg: #FFFFFF;
+            --text-main: #111827; --text-muted: #6B7280;
+            --danger: #EF4444; --success: #10B981; --warning: #F59E0B;
+            --border: #E5E7EB;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, sans-serif; }
+        body { background-color: var(--bg-color); color: var(--text-main); }
+        .container { padding: 20px; max-width: 1200px; margin: 0 auto; }
+
+        /* Navigation Tabs */
+        .tab-nav { display: flex; gap: 10px; margin-bottom: 20px; border-bottom: 2px solid var(--border); padding-bottom: 10px; }
+        .tab-btn { background: none; border: none; padding: 10px 20px; font-size: 1.1rem; font-weight: bold; color: var(--text-muted); cursor: pointer; border-radius: 6px; transition: 0.2s; }
+        .tab-btn:hover { background: #E5E7EB; }
+        .tab-btn.active { background: var(--primary); color: white; }
+
+        .tab-content { display: none; animation: fadeIn 0.3s ease; }
+        .tab-content.active { display: block; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+
+        /* Shared UI Elements */
+        .card { background-color: var(--card-bg); border-radius: 12px; padding: 20px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        h2 { margin-bottom: 15px; font-size: 1.25rem; }
+        input, button { padding: 10px; border-radius: 6px; border: 1px solid var(--border); font-size: 1rem; }
+        button { background-color: var(--primary); color: white; border: none; cursor: pointer; font-weight: bold; transition: 0.2s; }
+        button:hover { background-color: var(--primary-hover); }
+
+        /* Tab 1: Tracker Grid */
+        .add-subject-row { display: flex; gap: 10px; margin-bottom: 20px; }
+        .add-subject-row input { flex-grow: 1; }
+        .subject-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 15px; }
+        .subject-card { 
+            border: 1px solid var(--border); border-radius: 8px; padding: 20px; background: #F9FAFB; 
+            text-align: center; cursor: pointer; transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .subject-card:hover { transform: translateY(-3px); box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1); border-color: var(--primary); }
+        .subject-card h3 { color: var(--text-main); margin-bottom: 10px; }
+        .status-badge { display: inline-block; padding: 4px 8px; border-radius: 12px; font-size: 0.8rem; font-weight: bold; }
+        .status-active { background: #D1FAE5; color: #065F46; }
+        .status-idle { background: #E5E7EB; color: #374151; }
+
+        /* Fullscreen Analog Stopwatch */
+        #stopwatch-view {
+            display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: var(--text-main); color: white; z-index: 1000; flex-direction: column;
+            align-items: center; justify-content: center; padding: 20px;
+        }
+        #stopwatch-view.active { display: flex; animation: fadeIn 0.2s ease; }
+        .stopwatch-header { position: absolute; top: 20px; left: 20px; width: calc(100% - 40px); display: flex; justify-content: space-between; align-items: center; }
+        .btn-back { background: transparent; border: 1px solid #4B5563; color: white; }
+        .btn-back:hover { background: #374151; }
+        .sw-subject-title { font-size: 2rem; margin-bottom: 30px; color: #9CA3AF; }
+        
+        .analog-clock {
+            position: relative; width: 320px; height: 320px; background: #1F2937;
+            border: 8px solid var(--primary); border-radius: 50%; margin-bottom: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5), inset 0 0 20px rgba(0,0,0,0.5);
+            display: flex; align-items: center; justify-content: center;
+        }
+        .clock-center { position: absolute; width: 16px; height: 16px; background: white; border-radius: 50%; z-index: 10; }
+        .hand { position: absolute; bottom: 50%; left: 50%; transform-origin: bottom center; border-radius: 4px; transition: transform 0.1s cubic-bezier(0.4, 2.08, 0.55, 0.44); transform: translateX(-50%) rotate(0deg); }
+        .hand.minute { width: 6px; height: 110px; background: #D1D5DB; z-index: 8; }
+        .hand.second { width: 3px; height: 140px; background: var(--danger); z-index: 9; }
+        .tick { position: absolute; background: #4B5563; top: 50%; left: 50%; }
+
+        .sw-digits-small { font-size: 2rem; font-weight: bold; font-variant-numeric: tabular-nums; letter-spacing: 2px; margin-bottom: 40px; color: #9CA3AF; }
+        .sw-controls { display: flex; gap: 15px; }
+        .sw-btn { padding: 15px 30px; font-size: 1.2rem; border-radius: 50px; min-width: 150px; }
+        .btn-play { background: var(--success); } .btn-play:hover { background: #059669; }
+        .btn-pause { background: var(--warning); } .btn-pause:hover { background: #D97706; }
+        .btn-stop { background: var(--danger); } .btn-stop:hover { background: #DC2626; }
+
+        /* Analytics & History */
+        .analytics-menu { display: flex; gap: 10px; background: #F9FAFB; padding: 5px; border-radius: 8px; display: inline-flex; flex-wrap: wrap;}
+        .analytics-menu button { background: transparent; color: var(--text-muted); padding: 8px 16px; border: none; font-weight: normal; }
+        .analytics-menu button.active { background: white; color: var(--primary); box-shadow: 0 1px 3px rgba(0,0,0,0.1); font-weight: bold; }
+        
+        .custom-date-container { display: none; background: #F9FAFB; border: 1px solid var(--border); padding: 15px; border-radius: 8px; margin-top: 15px; align-items: center; gap: 15px; flex-wrap: wrap; animation: fadeIn 0.2s ease;}
+        .custom-date-container label { font-size: 0.9rem; font-weight: bold; color: var(--text-muted); display: flex; align-items: center; gap: 8px;}
+        .custom-date-container input[type="date"] { padding: 8px; font-size: 0.9rem; }
+
+        .charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px;}
+        .chart-container { height: 350px; position: relative; width: 100%; border: 1px solid var(--border); border-radius: 8px; padding: 10px; background: white; }
+
+        .history-group { margin-bottom: 10px; border: 1px solid var(--border); border-radius: 8px; background: white; overflow: hidden; }
+        .history-group summary { padding: 15px; font-weight: bold; background: #F9FAFB; cursor: pointer; list-style: none; display: flex; justify-content: space-between; align-items: center; }
+        .history-group summary::-webkit-details-marker { display: none; }
+        .history-group summary:hover { background: #F3F4F6; }
+        .history-details { padding: 15px; border-top: 1px solid var(--border); }
+        .history-item { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px dashed var(--border); }
+        .history-item:last-child { border-bottom: none; }
+
+        @media (max-width: 768px) {
+            .charts-grid { grid-template-columns: 1fr; }
+            .analog-clock { width: 250px; height: 250px; }
+            .hand.minute { height: 80px; } .hand.second { height: 110px; }
+            .sw-controls { flex-direction: column; width: 100%; max-width: 300px; }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container" id="main-ui">
+        <div class="tab-nav">
+            <button class="tab-btn active" onclick="switchTab('tab-tracker')" id="nav-tracker">⏱️ Active Trackers</button>
+            <button class="tab-btn" onclick="switchTab('tab-analytics')" id="nav-analytics">📊 Analytics</button>
+            <button class="tab-btn" onclick="switchTab('tab-history')" id="nav-history">📅 Daily Log</button>
+        </div>
+
+        <div id="tab-tracker" class="tab-content active">
+            <div class="card">
+                <h2>📚 Manage Subjects</h2>
+                <div class="add-subject-row">
+                    <input type="text" id="new-subject-input" placeholder="Enter new subject (e.g., General Studies)">
+                    <button onclick="addSubject()">Add Subject</button>
+                </div>
+                <div class="subject-grid" id="subject-grid"></div>
+            </div>
+        </div>
+
+        <div id="tab-analytics" class="tab-content">
+            <div class="card">
+                <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 15px;">
+                    <h2>📈 Subject Breakdown</h2>
+                    <div style="display: flex; flex-direction: column; align-items: flex-end;">
+                        <div class="analytics-menu">
+                            <button class="active" onclick="setAnalyticsTimeframe('daily', this)">Daily</button>
+                            <button onclick="setAnalyticsTimeframe('weekly', this)">Weekly</button>
+                            <button onclick="setAnalyticsTimeframe('monthly', this)">Monthly</button>
+                            <button onclick="setAnalyticsTimeframe('custom', this)">Custom Range</button>
+                        </div>
+                        <div class="custom-date-container" id="custom-date-picker">
+                            <label>From: <input type="date" id="date-start"></label>
+                            <label>To: <input type="date" id="date-end"></label>
+                            <button onclick="applyCustomDateRange()" style="padding: 8px 15px; font-size: 0.9rem;">Apply Range</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="charts-grid">
+                    <div class="chart-container"><canvas id="barChart"></canvas></div>
+                    <div class="chart-container"><canvas id="pieChart"></canvas></div>
+                </div>
+            </div>
+        </div>
+
+        <div id="tab-history" class="tab-content">
+            <div class="card">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <h2>📝 Organized Study Log</h2>
+                    <button onclick="clearAllData()" style="background: var(--danger); font-size: 0.8rem; padding: 5px 10px; width: auto;">⚠️ Clear Data</button>
+                </div>
+                <div id="history-container"></div>
+            </div>
+        </div>
+    </div>
+
+    <div id="stopwatch-view">
+        <div class="stopwatch-header">
+            <button class="btn-back sw-btn" onclick="closeStopwatch()">← Back to Dashboard</button>
+            <div id="sw-status" style="color: #9CA3AF;">Status: Idle</div>
+        </div>
+        <div class="sw-subject-title" id="sw-title">Subject Name</div>
+        <div class="analog-clock" id="clock-face">
+            <div class="hand minute" id="hand-min"></div>
+            <div class="hand second" id="hand-sec"></div>
+            <div class="clock-center"></div>
+        </div>
+        <div class="sw-digits-small" id="sw-display-digital">00:00:00</div>
+        <div class="sw-controls">
+            <button class="sw-btn btn-play" id="btn-sw-start" onclick="toggleTimer()">Start</button>
+            <button class="sw-btn btn-stop" onclick="stopAndLogTimer()">Stop & Log</button>
+        </div>
+    </div>
+
+    <script>
+        // --- 1. THE INLINE WEB WORKER (Background Thread) ---
+        const workerLogic = `
+            let timerInterval = null;
+            self.onmessage = function(e) {
+                if (e.data === 'start') {
+                    timerInterval = setInterval(() => self.postMessage('tick'), 500);
+                } else if (e.data === 'stop') {
+                    clearInterval(timerInterval);
+                    timerInterval = null;
+                }
+            };
+        `;
+        const blob = new Blob([workerLogic], { type: 'application/javascript' });
+        const worker = new Worker(URL.createObjectURL(blob));
+
+        // --- 2. GLOBAL STATE ---
+        let subjects = [];
+        let studyHistory = []; 
+        let activeTimers = {}; 
+        let currentActiveSubject = null; 
+
+        let barChartInstance, pieChartInstance;
+        const chartColors = ['#4F46E5', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6'];
+
+        // --- 3. PERSISTENT STORAGE SYSTEM (NEW) ---
+        function loadData() {
+            const savedSubjects = localStorage.getItem('studySyncSubjects');
+            const savedHistory = localStorage.getItem('studySyncHistory');
+            const savedTimers = localStorage.getItem('studySyncTimers');
+
+            if (savedSubjects && savedHistory && savedTimers) {
+                // User has been here before, load their data
+                subjects = JSON.parse(savedSubjects);
+                studyHistory = JSON.parse(savedHistory);
+                activeTimers = JSON.parse(savedTimers);
+            } else {
+                // First time visitor, load defaults and mock data
+                subjects = ["OSSC Mathematics", "Odia Language", "Reasoning"];
+                subjects.forEach(sub => activeTimers[sub] = { accumulatedElapsed: 0, startTime: null, isRunning: false });
+                seedMockData();
+                saveData(); // Save the initial state
+            }
+        }
+
+        function saveData() {
+            localStorage.setItem('studySyncSubjects', JSON.stringify(subjects));
+            localStorage.setItem('studySyncHistory', JSON.stringify(studyHistory));
+            
+            // Safety measure: We do not save active ticking state to prevent background desync.
+            // We bank the time into accumulatedElapsed instead.
+            const safeTimers = {};
+            for (let sub in activeTimers) {
+                safeTimers[sub] = {
+                    accumulatedElapsed: getCurrentElapsed(sub),
+                    startTime: null,
+                    isRunning: false
+                };
+            }
+            localStorage.setItem('studySyncTimers', JSON.stringify(safeTimers));
+        }
+
+        // Trigger safety save if user accidentally refreshes the page mid-tick
+        window.addEventListener('beforeunload', () => {
+            if (currentActiveSubject && activeTimers[currentActiveSubject].isRunning) {
+                worker.postMessage('stop');
+            }
+            saveData();
+        });
+
+        // Optional reset function
+        function clearAllData() {
+            if(confirm("Are you sure you want to delete all study history and subjects? This cannot be undone.")) {
+                localStorage.clear();
+                location.reload(); // Refresh to trigger default initialization
+            }
+        }
+
+        // --- 4. DATA SETUP & INITIALIZATION ---
+        function seedMockData() {
+            const today = new Date();
+            for(let i = 0; i < 40; i++) {
+                let d = new Date();
+                d.setDate(today.getDate() - Math.floor(Math.random() * 45)); 
+                let dateStr = d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+                studyHistory.push({
+                    dateStr: dateStr, timestamp: d.getTime(),
+                    subject: subjects[Math.floor(Math.random() * subjects.length)],
+                    minutes: Math.floor(Math.random() * 60) + 15 
+                });
+            }
+            studyHistory.sort((a, b) => b.timestamp - a.timestamp);
+        }
+
+        function createClockTicks() {
+            const clock = document.getElementById('clock-face');
+            for (let i = 0; i < 60; i++) {
+                const tick = document.createElement('div');
+                tick.className = 'tick';
+                if (i % 5 === 0) {
+                    tick.style.width = '4px'; tick.style.height = '15px'; tick.style.background = '#9CA3AF';
+                    tick.style.marginTop = '-7.5px'; tick.style.marginLeft = '-2px';
+                } else {
+                    tick.style.width = '2px'; tick.style.height = '8px'; tick.style.background = '#4B5563';
+                    tick.style.marginTop = '-4px'; tick.style.marginLeft = '-1px';
+                }
+                tick.style.transform = `rotate(${i * 6}deg) translateY(-145px)`;
+                clock.appendChild(tick);
+            }
+        }
+
+        window.onload = () => {
+            loadData(); // Replaces direct assignment
+            createClockTicks();
+            renderSubjectGrid();
+            renderHistoryLog();
+            initCharts();
+            setAnalyticsTimeframe('daily', document.querySelector('.analytics-menu button.active'));
+        };
+
+        // Background worker listener
+        worker.onmessage = function(e) {
+            if (e.data === 'tick' && currentActiveSubject && activeTimers[currentActiveSubject].isRunning) {
+                const currentSeconds = getCurrentElapsed(currentActiveSubject);
+                document.getElementById('sw-display-digital').innerText = formatTime(currentSeconds);
+                updateAnalogHands(currentSeconds);
+            }
+        };
+
+        // --- 5. CORE LOGIC ---
+        function getCurrentElapsed(subject) {
+            const state = activeTimers[subject];
+            if (state.isRunning) return Math.floor((Date.now() - state.startTime) / 1000);
+            return state.accumulatedElapsed;
+        }
+
+        function switchTab(tabId) {
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            document.getElementById('nav-' + tabId.split('-')[1]).classList.add('active');
+            document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+            document.getElementById(tabId).classList.add('active');
+        }
+
+        function addSubject() {
+            const val = document.getElementById('new-subject-input').value.trim();
+            if (val && !subjects.includes(val)) {
+                subjects.push(val);
+                activeTimers[val] = { accumulatedElapsed: 0, startTime: null, isRunning: false };
+                document.getElementById('new-subject-input').value = '';
+                saveData(); // Save new subject
+                renderSubjectGrid();
+            }
+        }
+
+        function renderSubjectGrid() {
+            const grid = document.getElementById('subject-grid');
+            grid.innerHTML = '';
+            subjects.forEach(sub => {
+                const state = activeTimers[sub];
+                const currentSeconds = getCurrentElapsed(sub); 
+                
+                const statusHtml = state.isRunning 
+                    ? `<div class="status-badge status-active">⏱️ Running (${formatTime(currentSeconds)})</div>`
+                    : currentSeconds > 0 
+                        ? `<div class="status-badge status-active" style="background:#FEF3C7; color:#B45309;">⏸️ Paused (${formatTime(currentSeconds)})</div>`
+                        : `<div class="status-badge status-idle">Idle</div>`;
+
+                const card = document.createElement('div');
+                card.className = 'subject-card';
+                card.onclick = () => openStopwatch(sub);
+                card.innerHTML = `<h3>${sub}</h3>${statusHtml}<div s
